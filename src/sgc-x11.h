@@ -7,7 +7,8 @@
 
 /*
  * X11 (XWayland or Xorg) side of the capture: finds Steam game windows and
- * reads their contents through MIT-SHM (falling back to plain GetImage).
+ * exports their contents as DMA-BUFs (DRI3) for zero-copy GPU import, or
+ * reads them through MIT-SHM / plain GetImage as a CPU fallback.
  *
  * A struct sgc_x11 owns one X connection and must only be used from one
  * thread at a time.
@@ -34,9 +35,24 @@ struct sgc_x11_frame {
 	uint32_t linesize;
 };
 
+#define SGC_MAX_PLANES 4
+
+struct sgc_dmabuf {
+	int fds[SGC_MAX_PLANES]; /* owned by the caller, see sgc_dmabuf_close() */
+	uint32_t strides[SGC_MAX_PLANES];
+	uint32_t offsets[SGC_MAX_PLANES];
+	uint32_t n_planes;
+	uint64_t modifier; /* DRM_FORMAT_MOD_INVALID when the server didn't say */
+	uint32_t drm_format;
+	uint32_t width;
+	uint32_t height;
+	uint64_t buffer_id; /* same value for the same underlying buffer */
+};
+
 enum sgc_grab_result {
 	SGC_GRAB_OK,
 	SGC_GRAB_UNAVAILABLE, /* minimized, resizing, unsupported depth... */
+	SGC_GRAB_UNSUPPORTED, /* DMA-BUF export impossible, use sgc_x11_grab() */
 	SGC_GRAB_GONE,        /* window was destroyed */
 	SGC_GRAB_ERROR,       /* X connection is broken */
 };
@@ -59,4 +75,9 @@ int sgc_x11_pick_game(const struct sgc_window_info *games, size_t count, uint32_
 void sgc_x11_attach(struct sgc_x11 *x, uint32_t window);
 void sgc_x11_detach(struct sgc_x11 *x);
 
+/* CPU path: copies the window contents into memory. */
 enum sgc_grab_result sgc_x11_grab(struct sgc_x11 *x, struct sgc_x11_frame *frame);
+
+/* GPU path: exports the window's current backing buffer, no pixel copy. */
+enum sgc_grab_result sgc_x11_grab_dmabuf(struct sgc_x11 *x, struct sgc_dmabuf *buf);
+void sgc_dmabuf_close(struct sgc_dmabuf *buf);

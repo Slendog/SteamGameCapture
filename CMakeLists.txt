@@ -17,12 +17,13 @@ set(CMAKE_C_EXTENSIONS ON)
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb xcb-composite xcb-shm xcb-res)
+pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb xcb-composite xcb-shm xcb-res xcb-dri3)
+pkg_check_modules(DRM REQUIRED libdrm) # drm_fourcc.h only
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
 
 # Backends shared by the plugin and the probe tool.
 add_library(sgc-core STATIC src/sgc-log.c src/sgc-x11.c src/sgc-pipewire.c)
-target_include_directories(sgc-core PUBLIC src)
+target_include_directories(sgc-core PUBLIC src ${DRM_INCLUDE_DIRS})
 target_compile_definitions(sgc-core PRIVATE _GNU_SOURCE)
 target_link_libraries(sgc-core PUBLIC PkgConfig::XCB PkgConfig::PIPEWIRE)
 set_target_properties(sgc-core PROPERTIES POSITION_INDEPENDENT_CODE ON)

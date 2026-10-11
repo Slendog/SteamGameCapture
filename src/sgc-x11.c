@@ -8,8 +8,13 @@
 #include <strings.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <drm_fourcc.h>
 
 #include <xcb/composite.h>
+#include <xcb/dri3.h>
 #include <xcb/res.h>
 #include <xcb/shm.h>
 #include <xcb/xcb.h>
@@ -40,6 +45,8 @@ struct sgc_x11 {
 	bool has_shm;
 	bool has_composite;
 	bool has_res;
+	bool has_dri3;
+	bool has_dri3_modifiers; /* DRI3 1.2: BuffersFromPixmap */
 	bool is_xwayland;
 
 	xcb_window_t target;
@@ -92,6 +99,15 @@ static void detect_extensions(struct sgc_x11 *x)
 		free(r);
 	}
 
+	ext = xcb_get_extension_data(conn, &xcb_dri3_id);
+	if (ext && ext->present) {
+		xcb_dri3_query_version_reply_t *r =
+			xcb_dri3_query_version_reply(conn, xcb_dri3_query_version(conn, 1, 2), NULL);
+		x->has_dri3 = r != NULL;
+		x->has_dri3_modifiers = r && (r->major_version > 1 || r->minor_version >= 2);
+		free(r);
+	}
+
 	x->is_xwayland = has_extension(conn, "XWAYLAND");
 }
 
@@ -128,9 +144,9 @@ struct sgc_x11 *sgc_x11_create(const char *display)
 
 	detect_extensions(x);
 
-	sgc_log(SGC_LOG_DEBUG, "Connected to X display %s (xwayland=%d shm=%d composite=%d xres=%d)",
+	sgc_log(SGC_LOG_DEBUG, "Connected to X display %s (xwayland=%d shm=%d composite=%d xres=%d dri3=%d)",
 		display && *display ? display : "$DISPLAY", x->is_xwayland, x->has_shm, x->has_composite,
-		x->has_res);
+		x->has_res, x->has_dri3);
 	return x;
 }
 
@@ -482,10 +498,10 @@ static enum sgc_grab_result request_failed(struct sgc_x11 *x, xcb_generic_error_
 	return xcb_connection_has_error(x->conn) ? SGC_GRAB_ERROR : SGC_GRAB_UNAVAILABLE;
 }
 
-enum sgc_grab_result sgc_x11_grab(struct sgc_x11 *x, struct sgc_x11_frame *frame)
+/* Common checks before reading a frame; fills size and depth of the window. */
+static enum sgc_grab_result check_window(struct sgc_x11 *x, uint32_t *width, uint32_t *height, uint8_t *depth)
 {
 	xcb_connection_t *conn = x->conn;
-	xcb_generic_error_t *err = NULL;
 
 	if (xcb_connection_has_error(conn))
 		return SGC_GRAB_ERROR;
@@ -505,22 +521,39 @@ enum sgc_grab_result sgc_x11_grab(struct sgc_x11 *x, struct sgc_x11_frame *frame
 		return xcb_connection_has_error(conn) ? SGC_GRAB_ERROR : SGC_GRAB_GONE;
 	}
 
-	uint32_t width = geo->width;
-	uint32_t height = geo->height;
-	uint8_t depth = geo->depth;
+	*width = geo->width;
+	*height = geo->height;
+	*depth = geo->depth;
 	bool viewable = attr->map_state == XCB_MAP_STATE_VIEWABLE;
 	free(geo);
 	free(attr);
 
-	if (!viewable || !width || !height)
+	if (!viewable || !*width || !*height)
 		return SGC_GRAB_UNAVAILABLE;
 
-	if (depth != 24 && depth != 32) {
+	if (*depth != 24 && *depth != 32 && *depth != 30) {
 		if (!x->warned_depth)
-			sgc_log(SGC_LOG_WARNING, "Window 0x%x has unsupported depth %u", x->target, depth);
+			sgc_log(SGC_LOG_WARNING, "Window 0x%x has unsupported depth %u", x->target, *depth);
 		x->warned_depth = true;
 		return SGC_GRAB_UNAVAILABLE;
 	}
+	return SGC_GRAB_OK;
+}
+
+enum sgc_grab_result sgc_x11_grab(struct sgc_x11 *x, struct sgc_x11_frame *frame)
+{
+	xcb_connection_t *conn = x->conn;
+	xcb_generic_error_t *err = NULL;
+	uint32_t width, height;
+	uint8_t depth;
+
+	enum sgc_grab_result res = check_window(x, &width, &height, &depth);
+	if (res != SGC_GRAB_OK)
+		return res;
+
+	/* BGRX output only; 30-bit windows need the DMA-BUF path. */
+	if (depth == 30)
+		return SGC_GRAB_UNAVAILABLE;
 
 	/* Depth 24 and 32 both use 32 bits per pixel in ZPixmap format. */
 	size_t size = (size_t)width * height * 4;
@@ -551,4 +584,122 @@ enum sgc_grab_result sgc_x11_grab(struct sgc_x11 *x, struct sgc_x11_frame *frame
 	frame->height = height;
 	frame->linesize = width * 4;
 	return SGC_GRAB_OK;
+}
+
+void sgc_dmabuf_close(struct sgc_dmabuf *buf)
+{
+	for (uint32_t i = 0; i < buf->n_planes; i++) {
+		if (buf->fds[i] >= 0)
+			close(buf->fds[i]);
+		buf->fds[i] = -1;
+	}
+	buf->n_planes = 0;
+}
+
+static uint32_t drm_format_for(uint8_t depth, uint8_t bpp)
+{
+	if (bpp != 32)
+		return 0;
+	/* Alpha of game windows is meaningless, always treat it as padding. */
+	switch (depth) {
+	case 24:
+	case 32:
+		return DRM_FORMAT_XRGB8888;
+	case 30:
+		return DRM_FORMAT_XRGB2101010;
+	default:
+		return 0;
+	}
+}
+
+/*
+ * Fetches the window pixmap as DMA-BUF. The pixmap is named again on every
+ * call because XWayland swaps in the game's buffer on each Present flip.
+ */
+enum sgc_grab_result sgc_x11_grab_dmabuf(struct sgc_x11 *x, struct sgc_dmabuf *buf)
+{
+	xcb_connection_t *conn = x->conn;
+	xcb_generic_error_t *err = NULL;
+	uint32_t width, height;
+	uint8_t depth, bpp;
+
+	memset(buf, 0, sizeof(*buf));
+	for (int i = 0; i < SGC_MAX_PLANES; i++)
+		buf->fds[i] = -1;
+
+	if (!x->has_dri3 || !x->has_composite)
+		return SGC_GRAB_UNSUPPORTED;
+
+	enum sgc_grab_result res = check_window(x, &width, &height, &depth);
+	if (res != SGC_GRAB_OK)
+		return res;
+
+	xcb_pixmap_t pixmap = xcb_generate_id(conn);
+	err = xcb_request_check(conn, xcb_composite_name_window_pixmap_checked(conn, x->target, pixmap));
+	if (err)
+		return request_failed(x, err);
+
+	if (x->has_dri3_modifiers) {
+		xcb_dri3_buffers_from_pixmap_reply_t *reply =
+			xcb_dri3_buffers_from_pixmap_reply(conn, xcb_dri3_buffers_from_pixmap(conn, pixmap), &err);
+		xcb_free_pixmap(conn, pixmap);
+		if (!reply)
+			goto export_failed;
+
+		int *fds = xcb_dri3_buffers_from_pixmap_reply_fds(conn, reply);
+		uint32_t *strides = xcb_dri3_buffers_from_pixmap_strides(reply);
+		uint32_t *offsets = xcb_dri3_buffers_from_pixmap_offsets(reply);
+		uint32_t n = reply->nfd;
+
+		for (uint32_t i = 0; i < n; i++) {
+			if (i < SGC_MAX_PLANES) {
+				buf->fds[i] = fds[i];
+				buf->strides[i] = strides[i];
+				buf->offsets[i] = offsets[i];
+			} else {
+				close(fds[i]);
+			}
+		}
+		buf->n_planes = n < SGC_MAX_PLANES ? n : SGC_MAX_PLANES;
+		buf->modifier = reply->modifier;
+		buf->width = reply->width;
+		buf->height = reply->height;
+		depth = reply->depth;
+		bpp = reply->bpp;
+		free(reply);
+	} else {
+		xcb_dri3_buffer_from_pixmap_reply_t *reply =
+			xcb_dri3_buffer_from_pixmap_reply(conn, xcb_dri3_buffer_from_pixmap(conn, pixmap), &err);
+		xcb_free_pixmap(conn, pixmap);
+		if (!reply)
+			goto export_failed;
+
+		buf->fds[0] = xcb_dri3_buffer_from_pixmap_reply_fds(conn, reply)[0];
+		buf->strides[0] = reply->stride;
+		buf->n_planes = 1;
+		buf->modifier = DRM_FORMAT_MOD_INVALID;
+		buf->width = reply->width;
+		buf->height = reply->height;
+		depth = reply->depth;
+		bpp = reply->bpp;
+		free(reply);
+	}
+
+	buf->drm_format = drm_format_for(depth, bpp);
+	if (!buf->n_planes || !buf->drm_format) {
+		sgc_dmabuf_close(buf);
+		return SGC_GRAB_UNSUPPORTED;
+	}
+
+	/* A DMA-BUF's inode identifies the buffer, whichever fd refers to it. */
+	struct stat st;
+	if (fstat(buf->fds[0], &st) == 0)
+		buf->buffer_id = (uint64_t)st.st_ino;
+
+	return SGC_GRAB_OK;
+
+export_failed:
+	free(err);
+	xcb_flush(conn);
+	return xcb_connection_has_error(conn) ? SGC_GRAB_ERROR : SGC_GRAB_UNSUPPORTED;
 }

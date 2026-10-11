@@ -5,6 +5,7 @@
  *   sgc-probe                     list detected Steam game windows
  *   sgc-probe --grab out.ppm      save one frame of the selected game
  *   sgc-probe --bench 120         time N frame grabs
+ *   sgc-probe --dmabuf 120        time N zero-copy DMA-BUF exports
  *   sgc-probe --audio 5           capture game audio for N seconds
  */
 #include <math.h>
@@ -86,7 +87,8 @@ static int write_ppm(const char *path, const struct sgc_x11_frame *f)
 static void usage(const char *argv0)
 {
 	fprintf(stderr,
-		"usage: %s [--display NAME] [--app-id N] [--grab FILE.ppm] [--bench FRAMES] [--audio SECONDS] "
+		"usage: %s [--display NAME] [--app-id N] [--grab FILE.ppm] [--bench FRAMES] [--dmabuf FRAMES] "
+		"[--audio SECONDS] "
 		"[--match TEXT]\n",
 		argv0);
 }
@@ -94,7 +96,7 @@ static void usage(const char *argv0)
 int main(int argc, char **argv)
 {
 	const char *display = NULL, *grab_path = NULL, *match = NULL;
-	unsigned int app_id = 0, bench = 0, audio_seconds = 0;
+	unsigned int app_id = 0, bench = 0, dmabuf = 0, audio_seconds = 0;
 
 	for (int i = 1; i < argc; i++) {
 		const char *arg = argv[i];
@@ -113,6 +115,8 @@ int main(int argc, char **argv)
 			grab_path = val;
 		else if (!strcmp(arg, "--bench"))
 			bench = (unsigned int)strtoul(val, NULL, 10);
+		else if (!strcmp(arg, "--dmabuf"))
+			dmabuf = (unsigned int)strtoul(val, NULL, 10);
 		else if (!strcmp(arg, "--audio"))
 			audio_seconds = (unsigned int)strtoul(val, NULL, 10);
 		else if (!strcmp(arg, "--match"))
@@ -169,6 +173,39 @@ int main(int argc, char **argv)
 		double elapsed = now_s() - start;
 		printf("Grabbed %u/%u frames in %.3f s (%.2f ms/frame, %.1f fps max)\n", ok, bench, elapsed,
 		       elapsed * 1000.0 / bench, bench / elapsed);
+	}
+
+	if (dmabuf) {
+		uint64_t ids[16];
+		unsigned int n_ids = 0, ok = 0;
+		struct sgc_dmabuf buf;
+		enum sgc_grab_result res = SGC_GRAB_OK;
+		double start = now_s();
+
+		for (unsigned int i = 0; i < dmabuf; i++) {
+			res = sgc_x11_grab_dmabuf(x, &buf);
+			if (res != SGC_GRAB_OK)
+				continue;
+			if (!ok)
+				printf("DMA-BUF: %ux%u fourcc %.4s modifier 0x%016llx planes %u stride %u\n", buf.width,
+				       buf.height, (const char *)&buf.drm_format, (unsigned long long)buf.modifier,
+				       buf.n_planes, buf.strides[0]);
+			ok++;
+
+			bool seen = false;
+			for (unsigned int j = 0; j < n_ids; j++)
+				seen |= ids[j] == buf.buffer_id;
+			if (!seen && n_ids < 16)
+				ids[n_ids++] = buf.buffer_id;
+			sgc_dmabuf_close(&buf);
+			usleep(16000);
+		}
+		double elapsed = now_s() - start - dmabuf * 0.016;
+		if (ok)
+			printf("Exported %u/%u frames, %.3f ms/export, %u distinct buffer(s)\n", ok, dmabuf,
+			       elapsed * 1000.0 / dmabuf, n_ids);
+		else
+			printf("DMA-BUF export failed (result %d)\n", res);
 	}
 
 	if (audio_seconds) {
