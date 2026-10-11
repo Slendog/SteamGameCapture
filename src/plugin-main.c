@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: Unlicense
 #include <stdio.h>
 
 #include <obs-module.h>

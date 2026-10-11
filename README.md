@@ -125,4 +125,7 @@ scripts/                   Flatpak build / install / probe helpers
 
 ## License
 
-GPL-2.0-or-later, the same license as OBS Studio.
+Released into the public domain under [The Unlicense](LICENSE).
+
+The compiled plugin links against libobs, which is GPL-2.0-or-later, so
+binaries you distribute together with OBS also fall under the GPL's terms.

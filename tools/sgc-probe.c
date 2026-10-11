@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: Unlicense
 /*
  * sgc-probe: exercises the capture backends without OBS.
  *
