@@ -67,6 +67,7 @@ prefix such as `/usr`.
 | Setting | Meaning |
 |---|---|
 | Game | *Any running Steam game* (default), or a specific AppID |
+| Capture cursor | Draws the mouse cursor while it is over the game and the game has focus (on by default). Games that draw their own cursor already include it in the frame |
 | Only capture video while visible | Skips frame grabs when the source isn't shown anywhere |
 | Capture game audio | PipeWire per-game audio |
 | Extra audio match | Also captures streams whose app name, node name or binary contains this text. Use it for games that play sound from a helper process |
@@ -85,6 +86,7 @@ properties shows the captured game, the capture path (*GPU zero-copy* or
 ./scripts/probe-flatpak.sh --grab /tmp/f.ppm    # save one frame
 ./scripts/probe-flatpak.sh --bench 120          # time CPU frame grabs
 ./scripts/probe-flatpak.sh --dmabuf 120         # check zero-copy DMA-BUF export
+./scripts/probe-flatpak.sh --cursor 10          # report cursor position/visibility
 ./scripts/probe-flatpak.sh --audio 5            # show captured audio level per second
 ```
 

@@ -17,7 +17,7 @@ set(CMAKE_C_EXTENSIONS ON)
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb xcb-composite xcb-shm xcb-res xcb-dri3)
+pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb xcb-composite xcb-shm xcb-res xcb-dri3 xcb-xfixes)
 pkg_check_modules(DRM REQUIRED libdrm) # drm_fourcc.h only
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
 

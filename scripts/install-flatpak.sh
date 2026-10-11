@@ -28,7 +28,10 @@ if [[ ! -f "$SO" ]]; then
 	exit 1
 fi
 
-install -Dm755 "$SO" "$DEST/bin/64bit/steam-game-capture.so"
+# Write a new file and rename it over the old one: overwriting the library
+# in place would corrupt it for an OBS instance that has it loaded.
+install -Dm755 "$SO" "$DEST/bin/64bit/.steam-game-capture.so.new"
+mv -f "$DEST/bin/64bit/.steam-game-capture.so.new" "$DEST/bin/64bit/steam-game-capture.so"
 mkdir -p "$DEST/data"
 cp -r "$ROOT/data/." "$DEST/data/"
 echo "Installed to $DEST"

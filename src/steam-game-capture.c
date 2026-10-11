@@ -18,6 +18,7 @@
 #define S_APP_ID "app_id"
 #define S_REFRESH "refresh"
 #define S_ONLY_WHEN_SHOWING "only_when_showing"
+#define S_CAPTURE_CURSOR "capture_cursor"
 #define S_CAPTURE_AUDIO "capture_audio"
 #define S_AUDIO_MATCH "audio_match"
 #define S_DISPLAY "display"
@@ -65,6 +66,7 @@ struct steam_game_capture {
 
 	uint32_t app_id;
 	bool only_when_showing;
+	bool capture_cursor;
 	char *display;
 	char *audio_match;
 	bool settings_dirty;
@@ -93,6 +95,12 @@ struct steam_game_capture {
 	bool texture_dynamic;
 	uint32_t width;
 	uint32_t height;
+
+	gs_texture_t *cursor_texture;
+	uint32_t cursor_serial;
+	int32_t cursor_x;
+	int32_t cursor_y;
+	bool cursor_visible;
 
 	struct imported_buffer imports[IMPORT_CACHE_SIZE];
 	uint32_t import_width;
@@ -287,7 +295,11 @@ static void release_capture(struct steam_game_capture *s)
 	clear_imports(s);
 	gs_texture_destroy(s->texture);
 	s->texture = NULL;
+	gs_texture_destroy(s->cursor_texture);
+	s->cursor_texture = NULL;
 	obs_leave_graphics();
+
+	s->cursor_visible = false;
 
 	s->width = 0;
 	s->height = 0;
@@ -410,6 +422,30 @@ static enum sgc_grab_result capture_cpu(struct steam_game_capture *s)
 	return SGC_GRAB_OK;
 }
 
+static void update_cursor(struct steam_game_capture *s)
+{
+	struct sgc_cursor cursor;
+
+	s->cursor_visible = false;
+	if (!sgc_x11_get_cursor(s->gx, &cursor) || !cursor.visible)
+		return;
+
+	if (!s->cursor_texture || cursor.serial != s->cursor_serial) {
+		/* Little-endian ARGB words are BGRA in memory. */
+		const uint8_t *pixels = (const uint8_t *)cursor.pixels;
+
+		obs_enter_graphics();
+		gs_texture_destroy(s->cursor_texture);
+		s->cursor_texture = gs_texture_create(cursor.width, cursor.height, GS_BGRA, 1, &pixels, 0);
+		obs_leave_graphics();
+		s->cursor_serial = cursor.serial;
+	}
+
+	s->cursor_x = cursor.x;
+	s->cursor_y = cursor.y;
+	s->cursor_visible = s->cursor_texture != NULL;
+}
+
 static void window_gone(struct steam_game_capture *s, uint32_t window, enum capture_status status)
 {
 	release_capture(s);
@@ -431,6 +467,7 @@ static void sgc_video_tick(void *data, float seconds)
 	pthread_mutex_lock(&s->mutex);
 	uint32_t window = s->game.window;
 	bool only_when_showing = s->only_when_showing;
+	bool capture_cursor = s->capture_cursor;
 	if (!s->gx_display || strcmp(s->gx_display, s->display) != 0)
 		new_display = bstrdup(s->display);
 	pthread_mutex_unlock(&s->mutex);
@@ -496,6 +533,11 @@ static void sgc_video_tick(void *data, float seconds)
 
 	switch (res) {
 	case SGC_GRAB_OK:
+		if (capture_cursor)
+			update_cursor(s);
+		else
+			s->cursor_visible = false;
+		break;
 	case SGC_GRAB_UNAVAILABLE:
 	case SGC_GRAB_UNSUPPORTED:
 		break;
@@ -510,6 +552,31 @@ static void sgc_video_tick(void *data, float seconds)
 		s->gx_next_connect = os_gettime_ns() + RECONNECT_INTERVAL_NS;
 		break;
 	}
+}
+
+/* The cursor image is premultiplied; keep the frame's alpha untouched. */
+static void render_cursor(struct steam_game_capture *s, bool linear_srgb)
+{
+	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	gs_eparam_t *image = gs_effect_get_param_by_name(effect, "image");
+
+	if (linear_srgb)
+		gs_effect_set_texture_srgb(image, s->cursor_texture);
+	else
+		gs_effect_set_texture(image, s->cursor_texture);
+
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+	gs_enable_color(true, true, true, false);
+	gs_matrix_push();
+	gs_matrix_translate3f((float)s->cursor_x, (float)s->cursor_y, 0.0f);
+
+	while (gs_effect_loop(effect, "Draw"))
+		gs_draw_sprite(s->cursor_texture, 0, 0, 0);
+
+	gs_matrix_pop();
+	gs_enable_color(true, true, true, true);
+	gs_blend_state_pop();
 }
 
 static void sgc_video_render(void *data, gs_effect_t *unused)
@@ -534,6 +601,9 @@ static void sgc_video_render(void *data, gs_effect_t *unused)
 
 	while (gs_effect_loop(effect, "Draw"))
 		gs_draw_sprite(s->texture, 0, 0, 0);
+
+	if (s->cursor_visible)
+		render_cursor(s, linear_srgb);
 
 	gs_enable_framebuffer_srgb(previous);
 }
@@ -562,6 +632,7 @@ static void sgc_update(void *data, obs_data_t *settings)
 
 	s->app_id = (uint32_t)obs_data_get_int(settings, S_APP_ID);
 	s->only_when_showing = obs_data_get_bool(settings, S_ONLY_WHEN_SHOWING);
+	s->capture_cursor = obs_data_get_bool(settings, S_CAPTURE_CURSOR);
 	bfree(s->display);
 	s->display = bstrdup(obs_data_get_string(settings, S_DISPLAY));
 	bfree(s->audio_match);
@@ -628,6 +699,7 @@ static void sgc_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, S_APP_ID, 0);
 	obs_data_set_default_bool(settings, S_ONLY_WHEN_SHOWING, true);
+	obs_data_set_default_bool(settings, S_CAPTURE_CURSOR, true);
 	obs_data_set_default_bool(settings, S_CAPTURE_AUDIO, true);
 	obs_data_set_default_string(settings, S_AUDIO_MATCH, "");
 	obs_data_set_default_string(settings, S_DISPLAY, "");
@@ -737,6 +809,7 @@ static obs_properties_t *sgc_properties(void *data)
 	fill_game_list(s, p);
 	obs_properties_add_button2(props, S_REFRESH, T_("Refresh"), refresh_clicked, s);
 
+	obs_properties_add_bool(props, S_CAPTURE_CURSOR, T_("CaptureCursor"));
 	obs_properties_add_bool(props, S_ONLY_WHEN_SHOWING, T_("OnlyWhenShowing"));
 
 	obs_properties_add_bool(props, S_CAPTURE_AUDIO, T_("CaptureAudio"));

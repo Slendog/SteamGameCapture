@@ -17,6 +17,7 @@
 #include <xcb/dri3.h>
 #include <xcb/res.h>
 #include <xcb/shm.h>
+#include <xcb/xfixes.h>
 #include <xcb/xcb.h>
 
 /* The Steam client itself carries STEAM_GAME=769 on its windows. */
@@ -30,11 +31,13 @@ enum {
 	ATOM_NET_WM_NAME,
 	ATOM_UTF8_STRING,
 	ATOM_WM_STATE,
+	ATOM_NET_ACTIVE_WINDOW,
 	ATOM_COUNT,
 };
 
 static const char *const atom_names[ATOM_COUNT] = {
-	"_NET_CLIENT_LIST", "STEAM_GAME", "_NET_WM_PID", "_NET_WM_NAME", "UTF8_STRING", "WM_STATE",
+	"_NET_CLIENT_LIST", "STEAM_GAME",     "_NET_WM_PID",         "_NET_WM_NAME",
+	"UTF8_STRING",      "WM_STATE",       "_NET_ACTIVE_WINDOW",
 };
 
 struct sgc_x11 {
@@ -47,11 +50,16 @@ struct sgc_x11 {
 	bool has_res;
 	bool has_dri3;
 	bool has_dri3_modifiers; /* DRI3 1.2: BuffersFromPixmap */
+	bool has_xfixes;
 	bool is_xwayland;
 
 	xcb_window_t target;
 	bool redirected;
 	bool warned_depth;
+	uint32_t target_width; /* from the last grab */
+	uint32_t target_height;
+
+	xcb_xfixes_get_cursor_image_reply_t *cursor_reply;
 
 	xcb_shm_seg_t shm_seg;
 	void *shm_addr;
@@ -105,6 +113,15 @@ static void detect_extensions(struct sgc_x11 *x)
 			xcb_dri3_query_version_reply(conn, xcb_dri3_query_version(conn, 1, 2), NULL);
 		x->has_dri3 = r != NULL;
 		x->has_dri3_modifiers = r && (r->major_version > 1 || r->minor_version >= 2);
+		free(r);
+	}
+
+	ext = xcb_get_extension_data(conn, &xcb_xfixes_id);
+	if (ext && ext->present) {
+		/* Version negotiation is mandatory before any other XFixes request. */
+		xcb_xfixes_query_version_reply_t *r =
+			xcb_xfixes_query_version_reply(conn, xcb_xfixes_query_version(conn, 4, 0), NULL);
+		x->has_xfixes = r && r->major_version >= 1;
 		free(r);
 	}
 
@@ -477,8 +494,12 @@ void sgc_x11_detach(struct sgc_x11 *x)
 	x->target = XCB_WINDOW_NONE;
 	x->redirected = false;
 	x->warned_depth = false;
+	x->target_width = 0;
+	x->target_height = 0;
 	free(x->image_reply);
 	x->image_reply = NULL;
+	free(x->cursor_reply);
+	x->cursor_reply = NULL;
 }
 
 void sgc_x11_destroy(struct sgc_x11 *x)
@@ -521,8 +542,8 @@ static enum sgc_grab_result check_window(struct sgc_x11 *x, uint32_t *width, uin
 		return xcb_connection_has_error(conn) ? SGC_GRAB_ERROR : SGC_GRAB_GONE;
 	}
 
-	*width = geo->width;
-	*height = geo->height;
+	*width = x->target_width = geo->width;
+	*height = x->target_height = geo->height;
 	*depth = geo->depth;
 	bool viewable = attr->map_state == XCB_MAP_STATE_VIEWABLE;
 	free(geo);
@@ -702,4 +723,55 @@ export_failed:
 	free(err);
 	xcb_flush(conn);
 	return xcb_connection_has_error(conn) ? SGC_GRAB_ERROR : SGC_GRAB_UNSUPPORTED;
+}
+
+bool sgc_x11_get_cursor(struct sgc_x11 *x, struct sgc_cursor *cursor)
+{
+	xcb_connection_t *conn = x->conn;
+
+	memset(cursor, 0, sizeof(*cursor));
+	if (!x->has_xfixes || !x->target || xcb_connection_has_error(conn))
+		return false;
+
+	xcb_xfixes_get_cursor_image_cookie_t cc = xcb_xfixes_get_cursor_image(conn);
+	xcb_translate_coordinates_cookie_t tc = xcb_translate_coordinates(conn, x->target, x->root, 0, 0);
+	xcb_get_property_cookie_t ac =
+		xcb_get_property(conn, 0, x->root, x->atoms[ATOM_NET_ACTIVE_WINDOW], XCB_ATOM_WINDOW, 0, 1);
+
+	free(x->cursor_reply);
+	x->cursor_reply = xcb_xfixes_get_cursor_image_reply(conn, cc, NULL);
+	xcb_translate_coordinates_reply_t *origin = xcb_translate_coordinates_reply(conn, tc, NULL);
+	xcb_get_property_reply_t *active = xcb_get_property_reply(conn, ac, NULL);
+
+	const xcb_xfixes_get_cursor_image_reply_t *image = x->cursor_reply;
+	if (!image || !origin) {
+		free(origin);
+		free(active);
+		return false;
+	}
+
+	/*
+	 * XWayland stops tracking the pointer once it moves onto a Wayland
+	 * window, leaving it parked at the game's edge. Only show the cursor
+	 * while the game has focus; without an EWMH WM, assume it does.
+	 */
+	bool focused = true;
+	if (active && active->format == 32 && xcb_get_property_value_length(active) >= 4)
+		focused = *(xcb_window_t *)xcb_get_property_value(active) == x->target;
+
+	int32_t px = image->x - origin->dst_x;
+	int32_t py = image->y - origin->dst_y;
+	bool inside = px >= 0 && py >= 0 && (uint32_t)px < x->target_width && (uint32_t)py < x->target_height;
+
+	cursor->visible = focused && inside && image->width && image->height;
+	cursor->x = px - image->xhot;
+	cursor->y = py - image->yhot;
+	cursor->width = image->width;
+	cursor->height = image->height;
+	cursor->serial = image->cursor_serial;
+	cursor->pixels = xcb_xfixes_get_cursor_image_cursor_image(image);
+
+	free(origin);
+	free(active);
+	return true;
 }

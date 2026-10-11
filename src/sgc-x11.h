@@ -35,6 +35,16 @@ struct sgc_x11_frame {
 	uint32_t linesize;
 };
 
+struct sgc_cursor {
+	bool visible; /* pointer inside the window and the game focused */
+	int32_t x;    /* top-left corner in window coordinates */
+	int32_t y;
+	uint32_t width;
+	uint32_t height;
+	uint32_t serial;         /* changes when the cursor image changes */
+	const uint32_t *pixels; /* premultiplied ARGB, valid until the next call */
+};
+
 #define SGC_MAX_PLANES 4
 
 struct sgc_dmabuf {
@@ -81,3 +91,6 @@ enum sgc_grab_result sgc_x11_grab(struct sgc_x11 *x, struct sgc_x11_frame *frame
 /* GPU path: exports the window's current backing buffer, no pixel copy. */
 enum sgc_grab_result sgc_x11_grab_dmabuf(struct sgc_x11 *x, struct sgc_dmabuf *buf);
 void sgc_dmabuf_close(struct sgc_dmabuf *buf);
+
+/* Cursor relative to the attached window (XFixes). False if unavailable. */
+bool sgc_x11_get_cursor(struct sgc_x11 *x, struct sgc_cursor *cursor);

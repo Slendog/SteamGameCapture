@@ -6,6 +6,7 @@
  *   sgc-probe --grab out.ppm      save one frame of the selected game
  *   sgc-probe --bench 120         time N frame grabs
  *   sgc-probe --dmabuf 120        time N zero-copy DMA-BUF exports
+ *   sgc-probe --cursor 5          report cursor position for N seconds
  *   sgc-probe --audio 5           capture game audio for N seconds
  */
 #include <math.h>
@@ -88,7 +89,7 @@ static void usage(const char *argv0)
 {
 	fprintf(stderr,
 		"usage: %s [--display NAME] [--app-id N] [--grab FILE.ppm] [--bench FRAMES] [--dmabuf FRAMES] "
-		"[--audio SECONDS] "
+		"[--cursor SECONDS] [--audio SECONDS] "
 		"[--match TEXT]\n",
 		argv0);
 }
@@ -96,7 +97,7 @@ static void usage(const char *argv0)
 int main(int argc, char **argv)
 {
 	const char *display = NULL, *grab_path = NULL, *match = NULL;
-	unsigned int app_id = 0, bench = 0, dmabuf = 0, audio_seconds = 0;
+	unsigned int app_id = 0, bench = 0, dmabuf = 0, cursor_seconds = 0, audio_seconds = 0;
 
 	for (int i = 1; i < argc; i++) {
 		const char *arg = argv[i];
@@ -117,6 +118,8 @@ int main(int argc, char **argv)
 			bench = (unsigned int)strtoul(val, NULL, 10);
 		else if (!strcmp(arg, "--dmabuf"))
 			dmabuf = (unsigned int)strtoul(val, NULL, 10);
+		else if (!strcmp(arg, "--cursor"))
+			cursor_seconds = (unsigned int)strtoul(val, NULL, 10);
 		else if (!strcmp(arg, "--audio"))
 			audio_seconds = (unsigned int)strtoul(val, NULL, 10);
 		else if (!strcmp(arg, "--match"))
@@ -206,6 +209,20 @@ int main(int argc, char **argv)
 			       elapsed * 1000.0 / dmabuf, n_ids);
 		else
 			printf("DMA-BUF export failed (result %d)\n", res);
+	}
+
+	for (unsigned int i = 0; i < cursor_seconds * 4; i++) {
+		struct sgc_x11_frame frame;
+		struct sgc_cursor cursor;
+
+		/* A grab refreshes the window size used for the bounds check. */
+		sgc_x11_grab(x, &frame);
+		if (sgc_x11_get_cursor(x, &cursor))
+			printf("cursor: %s at %d,%d size %ux%u serial %u\n", cursor.visible ? "visible" : "hidden ",
+			       cursor.x, cursor.y, cursor.width, cursor.height, cursor.serial);
+		else
+			printf("cursor: unavailable\n");
+		usleep(250000);
 	}
 
 	if (audio_seconds) {
