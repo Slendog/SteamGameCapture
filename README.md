@@ -67,7 +67,7 @@ prefix such as `/usr`.
 | Setting | Meaning |
 |---|---|
 | Game | *Any running Steam game* (default), or a specific AppID |
-| Capture cursor | Draws the mouse cursor while it is over the game and the game has focus (on by default). Games that draw their own cursor already include it in the frame |
+| Capture cursor | Draws the mouse cursor only while it is over the visible part of the game window (on by default). Games that draw their own cursor already include it in the frame |
 | Only capture video while visible | Skips frame grabs when the source isn't shown anywhere |
 | Capture game audio | PipeWire per-game audio |
 | Extra audio match | Also captures streams whose app name, node name or binary contains this text. Use it for games that play sound from a helper process |

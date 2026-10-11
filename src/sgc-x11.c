@@ -31,13 +31,11 @@ enum {
 	ATOM_NET_WM_NAME,
 	ATOM_UTF8_STRING,
 	ATOM_WM_STATE,
-	ATOM_NET_ACTIVE_WINDOW,
 	ATOM_COUNT,
 };
 
 static const char *const atom_names[ATOM_COUNT] = {
-	"_NET_CLIENT_LIST", "STEAM_GAME",     "_NET_WM_PID",         "_NET_WM_NAME",
-	"UTF8_STRING",      "WM_STATE",       "_NET_ACTIVE_WINDOW",
+	"_NET_CLIENT_LIST", "STEAM_GAME", "_NET_WM_PID", "_NET_WM_NAME", "UTF8_STRING", "WM_STATE",
 };
 
 struct sgc_x11 {
@@ -54,6 +52,7 @@ struct sgc_x11 {
 	bool is_xwayland;
 
 	xcb_window_t target;
+	xcb_window_t target_toplevel; /* child of root containing target (WM frame) */
 	bool redirected;
 	bool warned_depth;
 	uint32_t target_width; /* from the last grab */
@@ -466,10 +465,27 @@ fail:
 	return false;
 }
 
+/* Walks up to the root's child: the window manager frame, or the window itself. */
+static xcb_window_t find_toplevel(struct sgc_x11 *x, xcb_window_t window)
+{
+	for (int depth = 0; depth < 16; depth++) {
+		xcb_query_tree_reply_t *tree = xcb_query_tree_reply(x->conn, xcb_query_tree(x->conn, window), NULL);
+		if (!tree)
+			break;
+		xcb_window_t parent = tree->parent;
+		free(tree);
+		if (parent == x->root || parent == XCB_WINDOW_NONE)
+			return window;
+		window = parent;
+	}
+	return window;
+}
+
 void sgc_x11_attach(struct sgc_x11 *x, uint32_t window)
 {
 	sgc_x11_detach(x);
 	x->target = window;
+	x->target_toplevel = find_toplevel(x, window);
 
 	/*
 	 * Make sure obscured parts are rendered. XWayland already redirects
@@ -492,6 +508,7 @@ void sgc_x11_detach(struct sgc_x11 *x)
 	xcb_flush(x->conn);
 
 	x->target = XCB_WINDOW_NONE;
+	x->target_toplevel = XCB_WINDOW_NONE;
 	x->redirected = false;
 	x->warned_depth = false;
 	x->target_width = 0;
@@ -735,35 +752,33 @@ bool sgc_x11_get_cursor(struct sgc_x11 *x, struct sgc_cursor *cursor)
 
 	xcb_xfixes_get_cursor_image_cookie_t cc = xcb_xfixes_get_cursor_image(conn);
 	xcb_translate_coordinates_cookie_t tc = xcb_translate_coordinates(conn, x->target, x->root, 0, 0);
-	xcb_get_property_cookie_t ac =
-		xcb_get_property(conn, 0, x->root, x->atoms[ATOM_NET_ACTIVE_WINDOW], XCB_ATOM_WINDOW, 0, 1);
+	xcb_query_pointer_cookie_t pc = xcb_query_pointer(conn, x->root);
 
 	free(x->cursor_reply);
 	x->cursor_reply = xcb_xfixes_get_cursor_image_reply(conn, cc, NULL);
 	xcb_translate_coordinates_reply_t *origin = xcb_translate_coordinates_reply(conn, tc, NULL);
-	xcb_get_property_reply_t *active = xcb_get_property_reply(conn, ac, NULL);
+	xcb_query_pointer_reply_t *pointer = xcb_query_pointer_reply(conn, pc, NULL);
 
 	const xcb_xfixes_get_cursor_image_reply_t *image = x->cursor_reply;
-	if (!image || !origin) {
+	if (!image || !origin || !pointer) {
 		free(origin);
-		free(active);
+		free(pointer);
 		return false;
 	}
 
 	/*
-	 * XWayland stops tracking the pointer once it moves onto a Wayland
-	 * window, leaving it parked at the game's edge. Only show the cursor
-	 * while the game has focus; without an EWMH WM, assume it does.
+	 * The top-level window under the pointer must be the game. This hides
+	 * the cursor when another window covers the game, and when the pointer
+	 * is over a Wayland window: XWayland then leaves the position parked at
+	 * the game's edge but reports the root window as the one under it.
 	 */
-	bool focused = true;
-	if (active && active->format == 32 && xcb_get_property_value_length(active) >= 4)
-		focused = *(xcb_window_t *)xcb_get_property_value(active) == x->target;
+	bool over_game = pointer->same_screen && pointer->child == x->target_toplevel;
 
 	int32_t px = image->x - origin->dst_x;
 	int32_t py = image->y - origin->dst_y;
 	bool inside = px >= 0 && py >= 0 && (uint32_t)px < x->target_width && (uint32_t)py < x->target_height;
 
-	cursor->visible = focused && inside && image->width && image->height;
+	cursor->visible = over_game && inside && image->width && image->height;
 	cursor->x = px - image->xhot;
 	cursor->y = py - image->yhot;
 	cursor->width = image->width;
@@ -772,6 +787,6 @@ bool sgc_x11_get_cursor(struct sgc_x11 *x, struct sgc_cursor *cursor)
 	cursor->pixels = xcb_xfixes_get_cursor_image_cursor_image(image);
 
 	free(origin);
-	free(active);
+	free(pointer);
 	return true;
 }
