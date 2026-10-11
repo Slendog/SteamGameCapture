@@ -38,12 +38,11 @@ flatpak install flathub org.freedesktop.Sdk//25.08   # once; must match OBS's ru
 ./scripts/install-flatpak.sh
 ```
 
-On a Wayland session, Flatpak OBS has no X11 access by default. Steam games
-are X11 clients, so grant it once:
-
-```sh
-flatpak override --user --socket=x11 com.obsproject.Studio
-```
+The install script also grants OBS access to the X11 display with
+`flatpak override --user --socket=x11 com.obsproject.Studio`. On Wayland,
+Flatpak OBS only gets `fallback-x11`, which hides X11, but Steam games are X11
+clients. Pass `--no-x11-override` to skip this step. To undo it later, run
+`flatpak override --user --nosocket=x11 com.obsproject.Studio`.
 
 Restart OBS, then add **Sources → + → Steam Game Capture**.
 
@@ -91,8 +90,8 @@ properties shows the captured game, the capture path (*GPU zero-copy* or
 
 (`build/sgc-probe` works the same way for native builds.)
 
-- **"Cannot connect to the X11 display"**: OBS needs X11 access. See the
-  `flatpak override` command above.
+- **"Cannot connect to the X11 display"**: OBS needs X11 access. Re-run
+  `scripts/install-flatpak.sh` without `--no-x11-override`, then restart OBS.
 - **Video works but there are 0 audio streams**: the game plays audio from a
   different process. Find its name with `pw-dump` or `qpwgraph` and enter it
   under *Extra audio match*.
