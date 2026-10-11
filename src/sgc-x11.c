@@ -53,6 +53,10 @@ struct sgc_x11 {
 
 	xcb_window_t target;
 	xcb_window_t target_toplevel; /* child of root containing target (WM frame) */
+
+	/* Last top-level seen under the pointer and whether it is InputOnly. */
+	xcb_window_t pointer_child;
+	bool pointer_child_input_only;
 	bool redirected;
 	bool warned_depth;
 	uint32_t target_width; /* from the last grab */
@@ -509,6 +513,7 @@ void sgc_x11_detach(struct sgc_x11 *x)
 
 	x->target = XCB_WINDOW_NONE;
 	x->target_toplevel = XCB_WINDOW_NONE;
+	x->pointer_child = XCB_WINDOW_NONE;
 	x->redirected = false;
 	x->warned_depth = false;
 	x->target_width = 0;
@@ -742,6 +747,64 @@ export_failed:
 	return xcb_connection_has_error(conn) ? SGC_GRAB_ERROR : SGC_GRAB_UNSUPPORTED;
 }
 
+static bool is_input_only(struct sgc_x11 *x, xcb_window_t window)
+{
+	if (window != x->pointer_child) {
+		xcb_get_window_attributes_reply_t *attr =
+			xcb_get_window_attributes_reply(x->conn, xcb_get_window_attributes(x->conn, window), NULL);
+		x->pointer_child = window;
+		x->pointer_child_input_only = attr && attr->_class == XCB_WINDOW_CLASS_INPUT_ONLY;
+		free(attr);
+	}
+	return x->pointer_child_input_only;
+}
+
+/* Topmost mapped InputOutput child of the root containing the root position. */
+static xcb_window_t visible_toplevel_at(struct sgc_x11 *x, int32_t px, int32_t py)
+{
+	xcb_connection_t *conn = x->conn;
+	xcb_query_tree_reply_t *tree = xcb_query_tree_reply(conn, xcb_query_tree(conn, x->root), NULL);
+	if (!tree)
+		return XCB_WINDOW_NONE;
+
+	xcb_window_t *children = xcb_query_tree_children(tree);
+	int n = xcb_query_tree_children_length(tree);
+	xcb_get_window_attributes_cookie_t *ac = malloc(sizeof(*ac) * (size_t)n);
+	xcb_get_geometry_cookie_t *gc = malloc(sizeof(*gc) * (size_t)n);
+	xcb_window_t found = XCB_WINDOW_NONE;
+
+	for (int i = 0; i < n; i++) {
+		ac[i] = xcb_get_window_attributes(conn, children[i]);
+		gc[i] = xcb_get_geometry(conn, children[i]);
+	}
+
+	/* Children are listed bottom to top. */
+	for (int i = n - 1; i >= 0; i--) {
+		if (found) {
+			xcb_discard_reply(conn, ac[i].sequence);
+			xcb_discard_reply(conn, gc[i].sequence);
+			continue;
+		}
+
+		xcb_get_window_attributes_reply_t *attr = xcb_get_window_attributes_reply(conn, ac[i], NULL);
+		xcb_get_geometry_reply_t *geo = xcb_get_geometry_reply(conn, gc[i], NULL);
+		if (attr && geo && attr->_class == XCB_WINDOW_CLASS_INPUT_OUTPUT &&
+		    attr->map_state == XCB_MAP_STATE_VIEWABLE) {
+			int32_t right = geo->x + geo->width + 2 * geo->border_width;
+			int32_t bottom = geo->y + geo->height + 2 * geo->border_width;
+			if (px >= geo->x && py >= geo->y && px < right && py < bottom)
+				found = children[i];
+		}
+		free(attr);
+		free(geo);
+	}
+
+	free(ac);
+	free(gc);
+	free(tree);
+	return found;
+}
+
 bool sgc_x11_get_cursor(struct sgc_x11 *x, struct sgc_cursor *cursor)
 {
 	xcb_connection_t *conn = x->conn;
@@ -767,18 +830,29 @@ bool sgc_x11_get_cursor(struct sgc_x11 *x, struct sgc_cursor *cursor)
 	}
 
 	/*
-	 * The top-level window under the pointer must be the game. This hides
-	 * the cursor when another window covers the game, and when the pointer
-	 * is over a Wayland window: XWayland then leaves the position parked at
-	 * the game's edge but reports the root window as the one under it.
+	 * The visible top-level window under the pointer must be the game. This
+	 * hides the cursor when another window covers the game, and when the
+	 * pointer is over a Wayland window: XWayland then leaves the position
+	 * parked at the game's edge but reports no window under it.
+	 *
+	 * Invisible InputOnly windows are looked through: Wine stacks one over
+	 * the whole screen while a game confines the cursor (ClipCursor).
 	 */
-	bool over_game = pointer->same_screen && pointer->child == x->target_toplevel;
+	bool over_game = false;
+	if (pointer->same_screen && pointer->child != XCB_WINDOW_NONE) {
+		if (pointer->child == x->target_toplevel)
+			over_game = true;
+		else if (is_input_only(x, pointer->child))
+			over_game = visible_toplevel_at(x, pointer->root_x, pointer->root_y) == x->target_toplevel;
+	}
 
 	int32_t px = image->x - origin->dst_x;
 	int32_t py = image->y - origin->dst_y;
 	bool inside = px >= 0 && py >= 0 && (uint32_t)px < x->target_width && (uint32_t)py < x->target_height;
 
 	cursor->visible = over_game && inside && image->width && image->height;
+	cursor->over_game = over_game;
+	cursor->pointer_child = pointer->child;
 	cursor->x = px - image->xhot;
 	cursor->y = py - image->yhot;
 	cursor->width = image->width;

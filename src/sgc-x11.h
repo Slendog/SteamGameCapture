@@ -37,6 +37,8 @@ struct sgc_x11_frame {
 
 struct sgc_cursor {
 	bool visible; /* pointer is over the visible part of the game window */
+	bool over_game;   /* top-level window under the pointer is the game */
+	uint32_t pointer_child; /* top-level window under the pointer, for diagnostics */
 	int32_t x;    /* top-left corner in window coordinates */
 	int32_t y;
 	uint32_t width;

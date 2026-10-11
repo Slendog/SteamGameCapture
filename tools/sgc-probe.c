@@ -217,9 +217,15 @@ int main(int argc, char **argv)
 
 		/* A grab refreshes the window size used for the bounds check. */
 		sgc_x11_grab(x, &frame);
-		if (sgc_x11_get_cursor(x, &cursor))
-			printf("cursor: %s at %d,%d size %ux%u serial %u\n", cursor.visible ? "visible" : "hidden ",
-			       cursor.x, cursor.y, cursor.width, cursor.height, cursor.serial);
+		if (sgc_x11_get_cursor(x, &cursor)) {
+			uint32_t opaque = 0;
+			for (uint32_t p = 0; p < cursor.width * cursor.height; p++)
+				opaque += (cursor.pixels[p] >> 24) != 0;
+			printf("cursor: %s at %d,%d size %ux%u serial %u opaque-pixels %u pointer-over 0x%08x%s\n",
+			       cursor.visible ? "visible" : "hidden ", cursor.x, cursor.y, cursor.width,
+			       cursor.height, cursor.serial, opaque, cursor.pointer_child,
+			       cursor.over_game ? " (game)" : "");
+		}
 		else
 			printf("cursor: unavailable\n");
 		usleep(250000);
